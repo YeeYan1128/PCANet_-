@@ -1,0 +1,159 @@
+clc
+clear
+load indian_pines_corrected
+load indian_pines_gt
+
+% function [OA,AA,Kappa,aa,Time] = main_indiana(indian_pines_corrected, indian_pines_gt)
+tic; 
+%% 构造训练样本集
+fenshu=100;%划分小数据集的份数
+shuliang=0.1;%每份小数据集中取训练样本数量的比例，即每类取10%
+
+size_img(1)=size(indian_pines_corrected,1);
+size_img(2)=size(indian_pines_corrected,2);
+size_img(3)=size(indian_pines_corrected,3);
+labels=reshape(indian_pines_gt,size_img(1)*size_img(2),1); %labels:21025*1;indian_pines_gt:145*145
+fea=reshape(indian_pines_corrected,size_img(1)*size_img(2),size_img(3)); %fea:21025*200;q:145*145*200
+tu=indian_pines_gt;
+indexsvm=jiequyangben(tu,labels,fenshu,shuliang);
+
+%% PCA
+x1 = 35;%PCA后所取的主成分数
+[eve,~] = PCA(fea);
+feapca = fea*eve;
+fea = feapca(:,1:x1);
+
+%% RGF滤波
+% 归一化
+im=fea;
+sz = size(im,2);
+im = im./repmat(sqrt(sum(im.^2,2)),1,sz);
+fea=im;
+
+fea_matrix = reshape(fea,size_img(1),size_img(2),x1);
+% G = reshape(feapca(:,1),size_img(1),size_img(2),1);
+fea_r = zeros(size_img(1),size_img(2),x1);
+for i = 1:size(fea_matrix,3)
+    fea_rr = fea_matrix(:,:,i);
+    res = RollingGuidanceFilter(fea_rr,3,0.1,10);
+    fea_r(:,:,i) = res;
+end
+fea = reshape(fea_r,size_img(1)*size_img(2),x1);
+
+%% 将空间坐标加入pixel的光谱信息
+biao1=1:(size_img(1));
+biao2=1:(size_img(2));
+datarow=repmat(biao1',1,size_img(2));
+datacol=repmat(biao2,size_img(1),1);
+fea2=cat(3,datarow,datacol);
+zuobiao=hyperConvert2d(fea2)';%按列排
+y1=zuobiao(:,1);
+y2=zuobiao(:,2);
+fea=[fea y1 y1 y2 y2];
+%归一化
+im=fea;
+sz = size(im,2);
+im = im./repmat(sqrt(sum(im.^2,2)),1,sz);
+fea=im;
+
+%% PCANet_空间特征
+%每个像素点及其邻域的光谱信息展开作矩阵
+% data_matrix=reshape(fea,size_img(1),size_img(2));
+% label_matrix=reshape(labels,size_img(1),size_img(2));
+%建立索引坐标矩阵,填充0使得每个像素点的邻域都是3*3
+biao1=0:(size_img(1)+1);
+biao2=0:(size_img(2)+1);
+datarow=repmat(biao1',1,size_img(2)+2);
+datacol=repmat(biao2,size_img(1)+2,1);
+fea2=cat(3,datarow,datacol);
+% spatialdata=hyperConvert2d(fea2)';%按列排
+%对应扩展fea
+fea_matrix=reshape(fea,size_img(1),size_img(2),x1+ZBW);%按列排fea_matrix(1,2,:)是fea(146,:)
+fea_kuozhan=zeros(size_img(1)+2,size_img(2)+2,x1+ZBW);
+fea_kuozhan(2:end-1,2:end-1,:) = fea_matrix; 
+% fea_kuo=reshape(fea_kuozhan,(size_img(1)+2)*(size_img(2)+2),x1+ZBW);
+%每个像素点选取3*3邻域，每行为一个像素点的光谱信息，组成矩阵（一张图）
+spatial_img=cell(1,(size_img(1)+2)*(size_img(2)+2));
+%！！！有扩充的0、146的坐标不需要考虑邻域问题，不应该进入最后的数据！
+for i=2:size(fea_kuozhan,1)-1
+    for j=2:size(fea_kuozhan,2)-1
+        k = size(fea_kuozhan,1)*(j-2)+(i-1);
+        spatial_img{k}= [fea_kuozhan(i-1,j-1,:) fea_kuozhan(i,j-1,:) fea_kuozhan(i+1,j-1,:) fea_kuozhan(i-1,j,:) fea_kuozhan(i,j,:) fea_kuozhan(i+1,j,:) fea_kuozhan(i-1,j+1,:) fea_kuozhan(i,j+1,:) fea_kuozhan(i+1,j+1,:)];
+        spatial_img{k} = reshape(spatial_img{k},size(spatial_img{k},2),size(spatial_img{k},3));
+        spatial_img{k} = spatial_img{k}';
+    end
+end
+spatial_img(cellfun(@isempty,spatial_img))=[];
+
+%% 测试样本 训练样本
+% % 不分块取样
+%  %去掉分类为0的背景像素点
+% la = find(labels~=0);
+% labels_nozero = labels(la); %去掉分类为0的背景像素点
+%  %构造训练集、测试集，每类选取10%样本
+% class_num = length(unique(labels_nozero));
+% indexsvm = [];
+% for i = 1:class_num
+%     index = find(labels(:)==i);
+%     Smp = length(index);
+%     num = ceil(Smp*shuliang);
+%     rnd = randperm(Smp);
+%     setrain = rnd(1:num);
+%     triannum = index(setrain);
+%     indexsvm = [indexsvm triannum'];
+% end
+
+%打乱样本索引顺序
+rnd = randperm(length(indexsvm));
+indextrain = indexsvm(rnd);
+IndexTest = setdiff(1:size_img(1)*size_img(2),indextrain);
+index_0=find(labels==0);
+indextest=setdiff(IndexTest,index_0);
+rnd_2 = randperm(length(indextest));
+indextest = indextest(rnd_2);
+test_label=labels(indextest);
+train_label=labels(indextrain);
+train_spatial=cell(1,length(indextrain));
+for i=1:length(indextrain)
+    train_spatial{i}=spatial_img{indextrain(i)};
+end
+test_spatial=cell(1,length(indextest));
+for i=1:length(indextest)
+    test_spatial{i}=spatial_img{indextest(i)};
+end
+
+%% PCANet
+PCANet.NumStages=2;
+PCANet.PatchSize=[7 7]; %图像大小为17*9，采样窗口大小的列设置为7在函数中
+PCANet.NumFilters=[8 8]; %提取主成分个数,要小于采样窗口的长*宽（7*7），两层都是8
+PCANet.HistBlockSize=[7 7];
+PCANet.BlkOverLapRatio=0; 
+PCANet.Pyramid=[];
+disp('PCANet_train...');
+[f_train, V] = PCANet_train(train_spatial,PCANet,1);
+disp('PCANet_FeaExt...');
+f_test = PCANet_FeaExt(test_spatial, V, PCANet);
+
+%% SVM
+% display('jiaochayanzheng...');
+% [bestc,bestg]=jiaochayanzheng(f_train',train_label);
+bestc=8;
+bestg=3.0518*10^(-5);
+cmd=[' -t 2',' -c ',num2str(bestc),' -g ',num2str(bestg)];
+disp('svmtrain...');
+model = svmtrain(train_label,f_train',cmd);
+disp('svmpredict...');
+[prelabel,~]=svmpredict(test_label,f_test',model);
+tim=toc;
+[overall_accuracy, average_accuracy, kappa, accuracy_class, ~] = CaculateEvaluatingIndicator(prelabel,test_label);
+OA = overall_accuracy;
+AA = average_accuracy;
+Kappa = kappa;
+aa = accuracy_class;
+Time = tim;
+% end
+SPA_ZBW_SVM.OA=overall_accuracy;
+SPA_ZBW_SVM.AA=average_accuracy;
+SPA_ZBW_SVM.Kappa=kappa;
+SPA_ZBW_SVM.Time=tim;
+SPA_ZBW_SVM
